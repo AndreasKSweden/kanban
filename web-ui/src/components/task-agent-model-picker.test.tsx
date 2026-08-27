@@ -16,6 +16,7 @@ const fetchClineProviderModelsMock = vi.hoisted(() => vi.fn());
 vi.mock("@runtime-agent-catalog", () => ({
 	getRuntimeLaunchSupportedAgentCatalog: vi.fn(() => [
 		{ id: "cline", label: "Cline", binary: "cline" },
+		{ id: "cline-cli", label: "Cline CLI", binary: "cline" },
 		{ id: "claude", label: "Claude Code", binary: "claude" },
 		{ id: "gemini", label: "Gemini CLI", binary: "gemini" },
 		{ id: "kiro", label: "Kiro", binary: "kiro-cli" },
@@ -46,6 +47,13 @@ vi.mock("@runtime-agent-catalog", () => ({
 				effortOverride: "flag",
 				providerOverride: "none",
 				docsUrl: "https://code.claude.com/docs/en/cli-reference",
+			},
+			"cline-cli": {
+				label: "Cline CLI",
+				modelOverride: "flag",
+				effortOverride: "flag",
+				providerOverride: "flag",
+				docsUrl: "https://docs.cline.bot/cli/cli-reference",
 			},
 			gemini: {
 				label: "Gemini CLI",
@@ -453,6 +461,7 @@ describe("useTaskAgentModelPicker – provider-aware model default label", () =>
 
 const AGENT_OPTIONS = [
 	{ value: "", label: "Cline" },
+	{ value: "cline-cli", label: "Cline CLI" },
 	{ value: "claude", label: "Claude Code" },
 	{ value: "gemini", label: "Gemini CLI" },
 	{ value: "kiro", label: "Kiro" },
@@ -498,6 +507,71 @@ describe("TaskAgentModelPicker – mechanism-driven fields", () => {
 		const docsLink = container.querySelector('a[href="https://code.claude.com/docs/en/cli-reference"]');
 		expect(docsLink).not.toBeNull();
 		expect(docsLink?.textContent).toContain("Claude Code CLI reference");
+	});
+
+	it("shows free-text model, effort, and a docs link for cline-cli", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+
+		await act(async () =>
+			root.render(
+				<TaskAgentModelPicker
+					agentId={"cline-cli" as RuntimeAgentId}
+					onAgentIdChange={() => {}}
+					agentSettings={createTaskAgentSettings({ modelId: "sentinel-model" })}
+					onAgentSettingsChange={() => {}}
+					agentOptions={AGENT_OPTIONS}
+					clineProviderOptions={[{ value: "", label: "Default" }]}
+					clineModelOptions={[{ value: "", label: "Default" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+				/>,
+			),
+		);
+
+		await openOverrideSettings();
+
+		expect(container.querySelector('input[aria-label="Model override"]')).not.toBeNull();
+		expect(container.querySelector('input[aria-label="Reasoning effort override"]')).not.toBeNull();
+		const docsLink = container.querySelector('a[href="https://docs.cline.bot/cli/cli-reference"]');
+		expect(docsLink).not.toBeNull();
+		expect(docsLink?.textContent).toContain("Cline CLI CLI reference");
+	});
+
+	it("keeps provider when switching from cline to cline-cli", async () => {
+		const { TaskAgentModelPicker } = await import("@/components/task-agent-model-picker");
+		const onAgentSettingsChange = vi.fn();
+
+		await act(async () =>
+			root.render(
+				<TaskAgentModelPicker
+					agentId={"cline" as RuntimeAgentId}
+					onAgentIdChange={() => {}}
+					agentSettings={createTaskAgentSettings({
+						providerId: "openrouter",
+						modelId: "kept-model",
+					})}
+					onAgentSettingsChange={onAgentSettingsChange}
+					agentOptions={AGENT_OPTIONS}
+					clineProviderOptions={[{ value: "", label: "OpenRouter" }]}
+					clineModelOptions={[{ value: "", label: "Default" }]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"cline" as RuntimeAgentId}
+				/>,
+			),
+		);
+
+		await openOverrideSettings();
+		const select = container.querySelector("select");
+		expect(select).not.toBeNull();
+		await act(async () => {
+			const event = new Event("change", { bubbles: true });
+			Object.defineProperty(select, "value", { writable: true, value: "cline-cli" });
+			select?.dispatchEvent(event);
+		});
+
+		expect(onAgentSettingsChange).not.toHaveBeenCalled();
 	});
 
 	it("hides effort for gemini and both free-text fields for kiro", async () => {

@@ -322,6 +322,163 @@ echo '{"cancel":false}'
 `;
 }
 
+// ---------------------------------------------------------------------------
+// Cline CLI (cline 3.x) runtime hooks.
+//
+// Hook scripts are discovered by the CLI from `<cwd>/.cline/hooks/` (plus
+// user-level dirs) and must be named after the hook event. `--hooks-dir` only
+// sets CLINE_HOOKS_DIR, which current CLI builds never read, so the worktree
+// hooks directory is the only reliable injection point. Never overwrite a
+// user-owned hook file: every Kanban script carries a marker line, and files
+// without it are left untouched.
+// ---------------------------------------------------------------------------
+
+const CLINE_CLI_HOOK_SOURCE = "cline-cli";
+const KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER = "kanban-managed: cline-cli hook";
+const CLINE_CLI_ASK_TOOL_PATTERN = "ask_followup_question|ask_question|plan_mode_respond|submit_and_exit";
+
+type ClineCliHookName =
+	| "TaskStart"
+	| "TaskResume"
+	| "TaskCancel"
+	| "TaskComplete"
+	| "TaskError"
+	| "PreToolUse"
+	| "PostToolUse"
+	| "UserPromptSubmit";
+
+function getClineCliHookScriptPath(hooksDir: string, hookName: ClineCliHookName): string {
+	if (process.platform === "win32") {
+		return join(hooksDir, `${hookName}.ps1`);
+	}
+	return join(hooksDir, hookName);
+}
+
+function buildClineCliHookCommandParts(event: RuntimeHookEvent, hookName: ClineCliHookName): string[] {
+	const parts = buildHooksCommandParts(["notify", "--event", event, "--source", CLINE_CLI_HOOK_SOURCE]);
+	parts.push("--hook-event-name", hookName);
+	if (event === "to_review" && hookName === "TaskComplete") {
+		parts.push("--activity-text", "Waiting for review");
+	}
+	return parts;
+}
+
+function buildClineCliHookScriptContent(event: RuntimeHookEvent, hookName: ClineCliHookName): string {
+	const commandParts = buildClineCliHookCommandParts(event, hookName);
+	if (process.platform === "win32") {
+		const command = commandParts.map(powerShellQuote).join(" ");
+		return `# ${KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER} (${hookName})
+$inputText = [Console]::In.ReadToEnd()
+try {
+  $inputText | & ${command} | Out-Null
+} catch {
+}
+Write-Output '{"cancel":false}'
+exit 0
+`;
+	}
+	const command = commandParts.map(quoteShellArg).join(" ");
+	return `#!/usr/bin/env bash
+# ${KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER} (${hookName})
+INPUT="$(cat || true)"
+printf '%s' "$INPUT" | ${command} >/dev/null 2>&1 || true
+echo '{"cancel":false}'
+`;
+}
+
+function buildClineCliPreToolUseHookScriptContent(): string {
+	const activityCommand = buildClineCliHookCommandParts("activity", "PreToolUse");
+	const reviewCommand = buildClineCliHookCommandParts("to_review", "PreToolUse");
+	const inProgressCommand = buildClineCliHookCommandParts("to_in_progress", "PreToolUse");
+	if (process.platform === "win32") {
+		const activity = activityCommand.map(powerShellQuote).join(" ");
+		const review = reviewCommand.map(powerShellQuote).join(" ");
+		const inProgress = inProgressCommand.map(powerShellQuote).join(" ");
+		return `# ${KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER} (PreToolUse)
+$inputText = [Console]::In.ReadToEnd()
+$isUserQuestionTool = $inputText -match '"(toolName|tool)"\\s*:\\s*"(${CLINE_CLI_ASK_TOOL_PATTERN})"'
+try {
+  $inputText | & ${activity} | Out-Null
+} catch {
+}
+if ($isUserQuestionTool) {
+  try {
+    $inputText | & ${review} | Out-Null
+  } catch {
+  }
+} else {
+  try {
+    $inputText | & ${inProgress} | Out-Null
+  } catch {
+  }
+}
+Write-Output '{"cancel":false}'
+exit 0
+`;
+	}
+	const activity = activityCommand.map(quoteShellArg).join(" ");
+	const review = reviewCommand.map(quoteShellArg).join(" ");
+	const inProgress = inProgressCommand.map(quoteShellArg).join(" ");
+	return `#!/usr/bin/env bash
+# ${KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER} (PreToolUse)
+INPUT="$(cat || true)"
+printf '%s' "$INPUT" | ${activity} >/dev/null 2>&1 || true
+if printf '%s' "$INPUT" | grep -Eq '"(toolName|tool)"[[:space:]]*:[[:space:]]*"(${CLINE_CLI_ASK_TOOL_PATTERN})"'; then
+  printf '%s' "$INPUT" | ${review} >/dev/null 2>&1 || true
+else
+  printf '%s' "$INPUT" | ${inProgress} >/dev/null 2>&1 || true
+fi
+echo '{"cancel":false}'
+`;
+}
+
+function buildClineCliPostToolUseHookScriptContent(): string {
+	const activityCommand = buildClineCliHookCommandParts("activity", "PostToolUse");
+	const inProgressCommand = buildClineCliHookCommandParts("to_in_progress", "PostToolUse");
+	if (process.platform === "win32") {
+		const activity = activityCommand.map(powerShellQuote).join(" ");
+		const inProgress = inProgressCommand.map(powerShellQuote).join(" ");
+		return `# ${KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER} (PostToolUse)
+$inputText = [Console]::In.ReadToEnd()
+$isUserQuestionTool = $inputText -match '"(toolName|tool)"\\s*:\\s*"(${CLINE_CLI_ASK_TOOL_PATTERN})"'
+try {
+  $inputText | & ${activity} | Out-Null
+} catch {
+}
+if ($isUserQuestionTool) {
+  try {
+    $inputText | & ${inProgress} | Out-Null
+  } catch {
+  }
+}
+Write-Output '{"cancel":false}'
+exit 0
+`;
+	}
+	const activity = activityCommand.map(quoteShellArg).join(" ");
+	const inProgress = inProgressCommand.map(quoteShellArg).join(" ");
+	return `#!/usr/bin/env bash
+# ${KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER} (PostToolUse)
+INPUT="$(cat || true)"
+printf '%s' "$INPUT" | ${activity} >/dev/null 2>&1 || true
+if printf '%s' "$INPUT" | grep -Eq '"(toolName|tool)"[[:space:]]*:[[:space:]]*"(${CLINE_CLI_ASK_TOOL_PATTERN})"'; then
+  printf '%s' "$INPUT" | ${inProgress} >/dev/null 2>&1 || true
+fi
+echo '{"cancel":false}'
+`;
+}
+
+// Returns false when a user-owned hook file already exists at the path; Kanban
+// never clobbers non-Kanban hook scripts in the shared `.cline/hooks` folder.
+async function ensureKanbanManagedHookFile(filePath: string, content: string, executable: boolean): Promise<boolean> {
+	const existing = await readFile(filePath, "utf8").catch(() => null);
+	if (existing !== null && !existing.includes(KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER)) {
+		return false;
+	}
+	await ensureTextFile(filePath, content, executable);
+	return true;
+}
+
 function buildOpenCodePluginContent(
 	reviewCommand: string,
 	toInProgressCommand: string,
@@ -1800,6 +1957,121 @@ const piAdapter: AgentSessionAdapter = {
 	},
 };
 
+// Cline CLI (`cline` 3.x) as a PTY-driven task agent, distinct from the
+// embedded Cline SDK runtime ("cline"). Runs the interactive TUI so card
+// terminals stay open for follow-ups after the first turn completes.
+const clineCliAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		// --worktree/--zen/--kanban/--update would detach, recurse, or exit
+		// instead of running the task session Kanban launched.
+		let args = stripCliOptions([...input.args], ["--worktree", "--zen", "-z", "--kanban", "--update"]);
+		const env: Record<string, string | undefined> = {};
+		let sessionWarning: string | undefined;
+
+		if (input.startInPlanMode) {
+			// Plan mode must not inherit approval-bypass flags.
+			args = stripCliOptions(args, ["--auto-approve", "--yolo", "-y"]);
+			if (!hasCliOption(args, "--plan") && !hasCliOption(args, "-p")) {
+				args.push("--plan");
+			}
+		} else if (
+			input.autonomousModeEnabled &&
+			!hasCliOption(args, "--auto-approve") &&
+			!hasCliOption(args, "--yolo") &&
+			!hasCliOption(args, "-y")
+		) {
+			// Never pass --yolo here: yolo mode disables the CLI's hook dispatch
+			// entirely, which would freeze Kanban card state tracking.
+			args.push("--auto-approve", "true");
+		} else if (
+			!input.autonomousModeEnabled &&
+			!hasCliOption(args, "--auto-approve") &&
+			!hasCliOption(args, "--yolo") &&
+			!hasCliOption(args, "-y")
+		) {
+			// Cline CLI auto-approves every tool by default; opt out explicitly so
+			// non-autonomous sessions actually prompt in the terminal.
+			args.push("--auto-approve", "false");
+		}
+
+		// Cline CLI has no `--continue`; resume requires `--id <session-id>` and
+		// Kanban does not persist Cline session ids, so trash-restore relaunches
+		// with the original prompt instead of resuming.
+
+		const hooks = resolveHookContext(input);
+		if (hooks) {
+			const hooksDir = join(input.cwd, ".cline", "hooks");
+			const executable = process.platform !== "win32";
+			const hookFiles: Array<{ name: ClineCliHookName; content: string }> = [
+				{ name: "TaskStart", content: buildClineCliHookScriptContent("to_in_progress", "TaskStart") },
+				{ name: "TaskResume", content: buildClineCliHookScriptContent("to_in_progress", "TaskResume") },
+				{ name: "TaskCancel", content: buildClineCliHookScriptContent("to_review", "TaskCancel") },
+				{ name: "TaskComplete", content: buildClineCliHookScriptContent("to_review", "TaskComplete") },
+				{ name: "TaskError", content: buildClineCliHookScriptContent("to_review", "TaskError") },
+				{ name: "PreToolUse", content: buildClineCliPreToolUseHookScriptContent() },
+				{ name: "PostToolUse", content: buildClineCliPostToolUseHookScriptContent() },
+				{ name: "UserPromptSubmit", content: buildClineCliHookScriptContent("to_in_progress", "UserPromptSubmit") },
+			];
+			const skippedHooks: string[] = [];
+			for (const hookFile of hookFiles) {
+				const hookPath = getClineCliHookScriptPath(hooksDir, hookFile.name);
+				const written = await ensureKanbanManagedHookFile(hookPath, hookFile.content, executable);
+				if (!written) {
+					skippedHooks.push(hookFile.name);
+				}
+			}
+			if (skippedHooks.length > 0) {
+				sessionWarning = `Cline CLI hooks not installed for ${skippedHooks.join(", ")}: a user-owned .cline/hooks file already exists. Kanban card state will not track those events.`;
+			}
+
+			Object.assign(
+				env,
+				createHookRuntimeEnv({
+					taskId: hooks.taskId,
+					workspaceId: hooks.workspaceId,
+				}),
+			);
+		}
+
+		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
+		if (appendedSystemPrompt) {
+			// `-s/--system` would replace Cline's system prompt entirely; a project
+			// rules file appends instead and is auto-loaded from `.cline/rules/`.
+			const rulesPath = join(input.cwd, ".cline", "rules", "kanban-home-agent.md");
+			await ensureTextFile(rulesPath, `${appendedSystemPrompt}\n`);
+		}
+
+		// Per-task provider/model/effort overrides, passed verbatim. Cline CLI
+		// accepts -P/--provider, -m/--model, and --thinking. User/workspace args win.
+		applyCliOptionOverride(args, input.agentSettings?.providerId, ["--provider", "-P"]);
+		applyCliOptionOverride(args, input.agentSettings?.modelId, ["--model", "-m"]);
+		applyCliOptionOverride(args, input.agentSettings?.reasoningEffort, ["--thinking"]);
+
+		// A bare prompt runs one-shot and exits, killing the card terminal after
+		// the first turn. Force the interactive TUI unless the caller explicitly
+		// chose another output mode.
+		if (
+			input.prompt.trim() &&
+			!hasCliOption(args, "--tui") &&
+			!hasCliOption(args, "-i") &&
+			!hasCliOption(args, "--json") &&
+			!hasCliOption(args, "--acp")
+		) {
+			args.push("--tui");
+		}
+
+		const withPromptLaunch = withPrompt(args, input.prompt, "append");
+		return {
+			...withPromptLaunch,
+			env: {
+				...withPromptLaunch.env,
+				...env,
+			},
+			...(sessionWarning ? { sessionWarning } : {}),
+		};
+	},
+};
+
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	claude: claudeAdapter,
 	codex: codexAdapter,
@@ -1810,6 +2082,7 @@ const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	grok: grokAdapter,
 	pi: piAdapter,
 	cline: clineAdapter,
+	"cline-cli": clineCliAdapter,
 };
 
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {

@@ -69,6 +69,20 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		},
 	},
 	{
+		id: "cline-cli",
+		label: "Cline CLI",
+		binary: "cline",
+		baseArgs: [],
+		autonomousArgs: ["--auto-approve", "true"],
+		installUrl: "https://docs.cline.bot/cli/cli-reference",
+		capabilities: {
+			modelOverride: "flag",
+			effortOverride: "flag",
+			providerOverride: "flag",
+			docsUrl: "https://docs.cline.bot/cli/cli-reference",
+		},
+	},
+	{
 		id: "opencode",
 		label: "OpenCode",
 		binary: "opencode",
@@ -164,6 +178,7 @@ export const RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS: readonly RuntimeAgentId[] = [
 	"kiro",
 	"grok",
 	"pi",
+	"cline-cli",
 	// "opencode",
 	// "gemini",
 ];

@@ -1247,6 +1247,52 @@ describe("per-task agentSettings overrides", () => {
 		expect(launch.args).not.toContain("--model");
 	});
 
+	it("cline-cli: passes provider/model/effort verbatim as --provider/--model/--thinking", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			agentSettings: {
+				providerId: SENTINEL.providerId,
+				modelId: SENTINEL.modelId,
+				reasoningEffort: SENTINEL.reasoningEffort,
+			},
+		});
+
+		const providerIndex = launch.args.indexOf("--provider");
+		expect(providerIndex).toBeGreaterThan(-1);
+		expect(launch.args[providerIndex + 1]).toBe(SENTINEL.providerId);
+		const modelIndex = launch.args.indexOf("--model");
+		expect(modelIndex).toBeGreaterThan(-1);
+		expect(launch.args[modelIndex + 1]).toBe(SENTINEL.modelId);
+		const effortIndex = launch.args.indexOf("--thinking");
+		expect(effortIndex).toBeGreaterThan(-1);
+		expect(launch.args[effortIndex + 1]).toBe(SENTINEL.reasoningEffort);
+	});
+
+	it("cline-cli: keeps user-pinned flags and does not duplicate overrides", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: ["-m", "user-pinned-model", "--thinking", "high"],
+			cwd: "/tmp",
+			prompt: "",
+			agentSettings: { modelId: SENTINEL.modelId, reasoningEffort: SENTINEL.reasoningEffort },
+		});
+
+		expect(launch.args.filter((arg) => arg === "-m" || arg === "--model")).toHaveLength(1);
+		expect(launch.args).toContain("user-pinned-model");
+		expect(launch.args).not.toContain(SENTINEL.modelId);
+		expect(launch.args.filter((arg) => arg === "--thinking")).toHaveLength(1);
+		expect(launch.args).not.toContain(SENTINEL.reasoningEffort);
+	});
+
 	it("kiro: emits a visible session warning when settings are present; none when absent", async () => {
 		setupTempHome();
 		const withSettings = await prepareAgentLaunch({
@@ -1315,5 +1361,277 @@ describe("per-task agentSettings overrides", () => {
 		expect(launch.args.filter((arg) => arg === "--provider")).toHaveLength(1);
 		expect(launch.args).toContain("already-set");
 		expect(launch.args).not.toContain("claude-sonnet-4-5");
+	});
+});
+
+describe("cline-cli adapter", () => {
+	function setupTaskCwd(): string {
+		const home = setupTempHome();
+		const taskCwd = join(home, "worktree");
+		mkdirSync(taskCwd, { recursive: true });
+		return taskCwd;
+	}
+
+	function clineCliHookPath(taskCwd: string, hookName: string): string {
+		const fileName = process.platform === "win32" ? `${hookName}.ps1` : hookName;
+		return join(taskCwd, ".cline", "hooks", fileName);
+	}
+
+	it("writes Cline CLI hook scripts into the worktree .cline/hooks directory", async () => {
+		const taskCwd = setupTaskCwd();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: taskCwd,
+			prompt: "Ship the feature",
+			workspaceId: "workspace-1",
+		});
+
+		expect(launch.env.KANBAN_HOOK_TASK_ID).toBe("task-1");
+		expect(launch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
+		expect(launch.args).not.toContain("--hooks-dir");
+
+		const hookNames = [
+			"TaskStart",
+			"TaskResume",
+			"TaskCancel",
+			"TaskComplete",
+			"TaskError",
+			"PreToolUse",
+			"PostToolUse",
+			"UserPromptSubmit",
+		];
+		for (const hookName of hookNames) {
+			const hookPath = clineCliHookPath(taskCwd, hookName);
+			expect(existsSync(hookPath)).toBe(true);
+			const script = readFileSync(hookPath, "utf8");
+			expect(script).toContain("kanban-managed: cline-cli hook");
+			expect(script).toContain("'--source' 'cline-cli'");
+			expect(script).toContain(`'--hook-event-name' '${hookName}'`);
+			expect(script).toContain('{"cancel":false}');
+		}
+
+		expect(readFileSync(clineCliHookPath(taskCwd, "TaskComplete"), "utf8")).toContain("to_review");
+		expect(readFileSync(clineCliHookPath(taskCwd, "TaskComplete"), "utf8")).toContain("Waiting for review");
+		expect(readFileSync(clineCliHookPath(taskCwd, "TaskError"), "utf8")).toContain("to_review");
+		expect(readFileSync(clineCliHookPath(taskCwd, "TaskCancel"), "utf8")).toContain("to_review");
+		expect(readFileSync(clineCliHookPath(taskCwd, "UserPromptSubmit"), "utf8")).toContain("to_in_progress");
+		expect(readFileSync(clineCliHookPath(taskCwd, "TaskStart"), "utf8")).toContain("to_in_progress");
+
+		const preToolUseScript = readFileSync(clineCliHookPath(taskCwd, "PreToolUse"), "utf8");
+		expect(preToolUseScript).toContain("activity");
+		expect(preToolUseScript).toContain("to_review");
+		expect(preToolUseScript).toContain("to_in_progress");
+		expect(preToolUseScript).toContain("ask_followup_question");
+		expect(preToolUseScript).toContain("ask_question");
+		expect(preToolUseScript).toContain("submit_and_exit");
+
+		const postToolUseScript = readFileSync(clineCliHookPath(taskCwd, "PostToolUse"), "utf8");
+		expect(postToolUseScript).toContain("activity");
+		expect(postToolUseScript).toContain("to_in_progress");
+		expect(postToolUseScript).toContain("ask_followup_question");
+	});
+
+	it("never overwrites user-owned Cline CLI hook files and surfaces a session warning", async () => {
+		const taskCwd = setupTaskCwd();
+		const userHookPath = clineCliHookPath(taskCwd, "TaskComplete");
+		mkdirSync(join(taskCwd, ".cline", "hooks"), { recursive: true });
+		writeFileSync(userHookPath, "#!/usr/bin/env bash\necho user-owned\n", "utf8");
+
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: taskCwd,
+			prompt: "Ship the feature",
+			workspaceId: "workspace-1",
+		});
+
+		expect(readFileSync(userHookPath, "utf8")).toBe("#!/usr/bin/env bash\necho user-owned\n");
+		expect(launch.sessionWarning).toBeDefined();
+		expect(launch.sessionWarning).toContain("TaskComplete");
+		// Other hooks still install normally.
+		expect(existsSync(clineCliHookPath(taskCwd, "UserPromptSubmit"))).toBe(true);
+	});
+
+	it("refreshes stale Kanban-managed Cline CLI hook files", async () => {
+		const taskCwd = setupTaskCwd();
+		const hookPath = clineCliHookPath(taskCwd, "TaskComplete");
+		mkdirSync(join(taskCwd, ".cline", "hooks"), { recursive: true });
+		writeFileSync(hookPath, "# kanban-managed: cline-cli hook (TaskComplete)\n# stale\n", "utf8");
+
+		await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: taskCwd,
+			prompt: "Ship the feature",
+			workspaceId: "workspace-1",
+		});
+
+		const script = readFileSync(hookPath, "utf8");
+		expect(script).toContain("to_review");
+		expect(script).not.toContain("# stale");
+	});
+
+	it("forces the interactive TUI when launching with a prompt", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Ship the feature",
+		});
+
+		expect(launch.args).toContain("--tui");
+		expect(launch.args[launch.args.length - 1]).toBe("Ship the feature");
+	});
+
+	it("respects an explicit output mode instead of forcing the TUI", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: ["--json"],
+			cwd: "/tmp",
+			prompt: "Ship the feature",
+		});
+
+		expect(launch.args).not.toContain("--tui");
+		expect(launch.args).toContain("--json");
+	});
+
+	it("applies --auto-approve true in autonomous mode and never passes --yolo", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "",
+		});
+
+		const flagIndex = launch.args.indexOf("--auto-approve");
+		expect(flagIndex).toBeGreaterThan(-1);
+		expect(launch.args[flagIndex + 1]).toBe("true");
+		expect(launch.args).not.toContain("--yolo");
+		expect(launch.args).not.toContain("-y");
+	});
+
+	it("passes --auto-approve false when autonomous mode is disabled", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			autonomousModeEnabled: false,
+			cwd: "/tmp",
+			prompt: "",
+		});
+
+		const flagIndex = launch.args.indexOf("--auto-approve");
+		expect(flagIndex).toBeGreaterThan(-1);
+		expect(launch.args[flagIndex + 1]).toBe("false");
+	});
+
+	it("keeps a user-provided --auto-approve value", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: ["--auto-approve", "false"],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "",
+		});
+
+		expect(launch.args.filter((arg) => arg === "--auto-approve")).toHaveLength(1);
+		expect(launch.args[launch.args.indexOf("--auto-approve") + 1]).toBe("false");
+	});
+
+	it("starts plan mode without approval-bypass flags", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: ["--auto-approve", "true"],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "Ship the feature",
+			startInPlanMode: true,
+		});
+
+		expect(launch.args).toContain("--plan");
+		expect(launch.args).not.toContain("--auto-approve");
+		expect(launch.args).not.toContain("--yolo");
+	});
+
+	it("strips detaching and non-session flags", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: ["--worktree", "--zen", "--kanban", "--update"],
+			cwd: "/tmp",
+			prompt: "Ship the feature",
+		});
+
+		expect(launch.args).not.toContain("--worktree");
+		expect(launch.args).not.toContain("--zen");
+		expect(launch.args).not.toContain("--kanban");
+		expect(launch.args).not.toContain("--update");
+	});
+
+	it("does not add a resume flag on trash restore", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Ship the feature",
+			resumeFromTrash: true,
+		});
+
+		expect(launch.args).not.toContain("--continue");
+		expect(launch.args).not.toContain("--id");
+		expect(launch.args).toContain("--tui");
+	});
+
+	it("writes home-agent sidebar instructions as a project rules file instead of replacing the system prompt", async () => {
+		const home = setupTempHome();
+		const taskCwd = join(home, "workspace");
+		mkdirSync(taskCwd, { recursive: true });
+		setKanbanProcessContext();
+		const launch = await prepareAgentLaunch({
+			taskId: "__home_agent__:workspace-1:cline-cli",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: taskCwd,
+			prompt: "",
+		});
+
+		expect(launch.args).not.toContain("--system");
+		expect(launch.args).not.toContain("-s");
+		const rulesPath = join(taskCwd, ".cline", "rules", "kanban-home-agent.md");
+		expect(existsSync(rulesPath)).toBe(true);
+		const rules = readFileSync(rulesPath, "utf8");
+		expect(rules).toContain("Kanban sidebar agent");
+		expect(rules).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create");
 	});
 });

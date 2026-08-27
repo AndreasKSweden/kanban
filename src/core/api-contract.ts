@@ -81,6 +81,7 @@ export const runtimeAgentIdSchema = z.enum([
 	"grok",
 	"pi",
 	"cline",
+	"cline-cli",
 ]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
 

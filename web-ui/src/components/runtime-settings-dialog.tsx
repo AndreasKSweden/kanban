@@ -92,8 +92,16 @@ const GIT_PROMPT_VARIANT_OPTIONS: Array<{ value: TaskGitAction; label: string }>
 
 export type RuntimeSettingsSection = "shortcuts";
 
-const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "droid", "kiro", "grok", "pi"];
-
+const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = [
+	"cline",
+	"cline-cli",
+	"claude",
+	"codex",
+	"droid",
+	"kiro",
+	"grok",
+	"pi",
+];
 type SettingsNavId = "general" | "cline" | "git-prompts" | "notifications" | "appearance" | "project";
 
 const SETTINGS_NAV_ITEMS: ReadonlyArray<{

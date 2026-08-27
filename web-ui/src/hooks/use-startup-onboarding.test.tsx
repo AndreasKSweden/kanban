@@ -52,6 +52,15 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 				installed: true,
 				configured: selectedAgentId === "pi",
 			},
+			{
+				id: "cline-cli",
+				label: "Cline CLI",
+				binary: "cline",
+				command: "cline",
+				defaultArgs: [],
+				installed: true,
+				configured: selectedAgentId === "cline-cli",
+			},
 		],
 		shortcuts: [],
 		clineProviderSettings: {

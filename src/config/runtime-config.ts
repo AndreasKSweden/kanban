@@ -127,7 +127,8 @@ function normalizeAgentId(agentId: RuntimeAgentId | string | null | undefined): 
 			agentId === "kiro" ||
 			agentId === "grok" ||
 			agentId === "pi" ||
-			agentId === "cline") &&
+			agentId === "cline" ||
+			agentId === "cline-cli") &&
 		isRuntimeAgentLaunchSupported(agentId)
 	) {
 		return agentId;
