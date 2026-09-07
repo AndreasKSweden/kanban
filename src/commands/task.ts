@@ -372,6 +372,7 @@ function formatTaskRecord(
 	const session = state.sessions[task.id] ?? null;
 	return {
 		id: task.id,
+		title: task.title,
 		prompt: task.prompt,
 		column: columnId,
 		baseRef: task.baseRef,
