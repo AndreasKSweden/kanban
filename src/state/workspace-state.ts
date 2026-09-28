@@ -159,11 +159,13 @@ function createEmptyWorkspaceIndex(): WorkspaceIndexFile {
 }
 
 export function getRuntimeHomePath(): string {
-	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_HOME_DIR);
+	const override = process.env.KANBAN_RUNTIME_HOME?.trim();
+	return override ? resolve(override) : join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_HOME_DIR);
 }
 
 export function getTaskWorktreesHomePath(): string {
-	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_WORKTREES_DIR);
+	const override = process.env.KANBAN_WORKTREES_HOME?.trim();
+	return override ? resolve(override) : join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_WORKTREES_DIR);
 }
 
 export function getWorkspacesRootPath(): string {
