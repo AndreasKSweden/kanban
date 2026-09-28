@@ -123,7 +123,17 @@ function collectTaskIds(board: RuntimeBoardData): Set<string> {
 }
 
 function createDependencyId(): string {
-	return crypto.randomUUID().replaceAll("-", "").slice(0, 8);
+	if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+		return crypto.randomUUID().replaceAll("-", "").slice(0, 8);
+	}
+
+	if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+		const bytes = new Uint8Array(4);
+		crypto.getRandomValues(bytes);
+		return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+	}
+
+	return Math.random().toString(16).slice(2, 10).padEnd(8, "0");
 }
 
 function createDependencyPairKey(backlogTaskId: string, linkedTaskId: string): string {
