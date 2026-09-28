@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ import { quoteShellArg } from "../core/shell";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { resolveHomeAgentAppendSystemPrompt } from "../prompts/append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
+import { type ClineCliHubRunEvent, createClineCliHubObserver } from "./cline-cli-hub-observer";
 import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
 import {
@@ -57,11 +59,14 @@ export type AgentExitReviewActivityResolver = (
 	interrupted: boolean,
 ) => Promise<Partial<RuntimeTaskHookActivity> | null>;
 
+export type AgentSessionStartedHandler = (summary: RuntimeTaskSessionSummary) => Promise<void>;
+
 export interface PreparedAgentLaunch {
 	binary?: string;
 	args: string[];
 	env: Record<string, string | undefined>;
 	cleanup?: () => Promise<void>;
+	onSessionStarted?: AgentSessionStartedHandler;
 	deferredStartupInput?: string;
 	sessionWarning?: string;
 	detectOutputTransition?: AgentOutputTransitionDetector;
@@ -335,6 +340,8 @@ echo '{"cancel":false}'
 
 const CLINE_CLI_HOOK_SOURCE = "cline-cli";
 const KANBAN_MANAGED_CLINE_CLI_HOOK_MARKER = "kanban-managed: cline-cli hook";
+const KANBAN_MANAGED_CLINE_CLI_IGNORE_MARKER = "kanban-managed: cline-cli hook ignores";
+const KANBAN_MANAGED_CLINE_CLI_RULES_IGNORE_MARKER = "kanban-managed: cline-cli rule ignores";
 const CLINE_CLI_ASK_TOOL_PATTERN = "ask_followup_question|ask_question|plan_mode_respond|submit_and_exit";
 
 type ClineCliHookName =
@@ -347,11 +354,21 @@ type ClineCliHookName =
 	| "PostToolUse"
 	| "UserPromptSubmit";
 
+function getClineCliHookScriptFileName(hookName: ClineCliHookName): string {
+	return process.platform === "win32" ? `${hookName}.ps1` : hookName;
+}
+
 function getClineCliHookScriptPath(hooksDir: string, hookName: ClineCliHookName): string {
-	if (process.platform === "win32") {
-		return join(hooksDir, `${hookName}.ps1`);
-	}
-	return join(hooksDir, hookName);
+	return join(hooksDir, getClineCliHookScriptFileName(hookName));
+}
+
+function buildClineCliHookIgnoreContent(hookNames: ClineCliHookName[]): string {
+	return [
+		`# ${KANBAN_MANAGED_CLINE_CLI_IGNORE_MARKER}`,
+		"/.gitignore",
+		...hookNames.map((hookName) => `/${getClineCliHookScriptFileName(hookName)}`),
+		"",
+	].join("\n");
 }
 
 function buildClineCliHookCommandParts(event: RuntimeHookEvent, hookName: ClineCliHookName): string[] {
@@ -361,6 +378,60 @@ function buildClineCliHookCommandParts(event: RuntimeHookEvent, hookName: ClineC
 		parts.push("--activity-text", "Waiting for review");
 	}
 	return parts;
+}
+
+function notifyClineCliHubRunEvent(
+	event: ClineCliHubRunEvent,
+	hooks: NonNullable<ReturnType<typeof resolveHookContext>>,
+	env: Record<string, string | undefined>,
+): Promise<void> {
+	const runtimeEvent: RuntimeHookEvent = event === "run.started" ? "to_in_progress" : "to_review";
+	const parts = buildHooksCommandParts([
+		"notify",
+		"--event",
+		runtimeEvent,
+		"--source",
+		CLINE_CLI_HOOK_SOURCE,
+		"--hook-event-name",
+		event,
+	]);
+
+	if (event === "run.completed") {
+		parts.push("--activity-text", "Waiting for review");
+	} else if (event === "run.failed") {
+		parts.push("--activity-text", "Cline run failed");
+	} else if (event === "run.aborted") {
+		parts.push("--activity-text", "Cline run aborted");
+	}
+
+	const [command, ...args] = parts;
+	if (!command) {
+		return Promise.reject(new Error("Unable to build Cline Hub hook notification command"));
+	}
+
+	return new Promise((resolvePromise, rejectPromise) => {
+		const child = spawn(command, args, {
+			env: {
+				...process.env,
+				...env,
+				...createHookRuntimeEnv({
+					taskId: hooks.taskId,
+					workspaceId: hooks.workspaceId,
+				}),
+			},
+			stdio: "ignore",
+			windowsHide: true,
+		});
+
+		child.once("error", rejectPromise);
+		child.once("exit", (code) => {
+			if (code === 0) {
+				resolvePromise();
+			} else {
+				rejectPromise(new Error(`Cline Hub hook notification exited with code ${code ?? "unknown"}`));
+			}
+		});
+	});
 }
 
 function buildClineCliHookScriptContent(event: RuntimeHookEvent, hookName: ClineCliHookName): string {
@@ -476,6 +547,27 @@ async function ensureKanbanManagedHookFile(filePath: string, content: string, ex
 		return false;
 	}
 	await ensureTextFile(filePath, content, executable);
+	return true;
+}
+
+async function ensureKanbanManagedHookIgnoreFile(filePath: string, hookNames: ClineCliHookName[]): Promise<boolean> {
+	const existing = await readFile(filePath, "utf8").catch(() => null);
+	if (existing !== null && !existing.includes(KANBAN_MANAGED_CLINE_CLI_IGNORE_MARKER)) {
+		return false;
+	}
+	await ensureTextFile(filePath, buildClineCliHookIgnoreContent(hookNames));
+	return true;
+}
+
+async function ensureKanbanManagedRulesIgnoreFile(filePath: string): Promise<boolean> {
+	const existing = await readFile(filePath, "utf8").catch(() => null);
+	if (existing !== null && !existing.includes(KANBAN_MANAGED_CLINE_CLI_RULES_IGNORE_MARKER)) {
+		return false;
+	}
+	await ensureTextFile(
+		filePath,
+		[`# ${KANBAN_MANAGED_CLINE_CLI_RULES_IGNORE_MARKER}`, "/.gitignore", "/kanban-home-agent.md", ""].join("\n"),
+	);
 	return true;
 }
 
@@ -1962,6 +2054,8 @@ const piAdapter: AgentSessionAdapter = {
 // terminals stay open for follow-ups after the first turn completes.
 const clineCliAdapter: AgentSessionAdapter = {
 	async prepare(input) {
+		const preparedAt = Date.now();
+
 		// --worktree/--zen/--kanban/--update would detach, recurse, or exit
 		// instead of running the task session Kanban launched.
 		let args = stripCliOptions([...input.args], ["--worktree", "--zen", "-z", "--kanban", "--update"]);
@@ -2013,15 +2107,28 @@ const clineCliAdapter: AgentSessionAdapter = {
 				{ name: "UserPromptSubmit", content: buildClineCliHookScriptContent("to_in_progress", "UserPromptSubmit") },
 			];
 			const skippedHooks: string[] = [];
+			const managedHooks: ClineCliHookName[] = [];
+
 			for (const hookFile of hookFiles) {
 				const hookPath = getClineCliHookScriptPath(hooksDir, hookFile.name);
 				const written = await ensureKanbanManagedHookFile(hookPath, hookFile.content, executable);
 				if (!written) {
 					skippedHooks.push(hookFile.name);
+				} else {
+					managedHooks.push(hookFile.name);
 				}
 			}
+
 			if (skippedHooks.length > 0) {
 				sessionWarning = `Cline CLI hooks not installed for ${skippedHooks.join(", ")}: a user-owned .cline/hooks file already exists. Kanban card state will not track those events.`;
+			}
+
+			const ignorePath = join(hooksDir, ".gitignore");
+			const ignoreWritten = await ensureKanbanManagedHookIgnoreFile(ignorePath, managedHooks);
+			if (!ignoreWritten) {
+				const warning =
+					"Cline CLI managed hooks could not be hidden from Git because a user-owned .cline/hooks/.gitignore already exists.";
+				sessionWarning = [sessionWarning, warning].filter(Boolean).join(" ");
 			}
 
 			Object.assign(
@@ -2037,8 +2144,16 @@ const clineCliAdapter: AgentSessionAdapter = {
 		if (appendedSystemPrompt) {
 			// `-s/--system` would replace Cline's system prompt entirely; a project
 			// rules file appends instead and is auto-loaded from `.cline/rules/`.
-			const rulesPath = join(input.cwd, ".cline", "rules", "kanban-home-agent.md");
+			const rulesDir = join(input.cwd, ".cline", "rules");
+			const rulesPath = join(rulesDir, "kanban-home-agent.md");
 			await ensureTextFile(rulesPath, `${appendedSystemPrompt}\n`);
+
+			const rulesIgnoreWritten = await ensureKanbanManagedRulesIgnoreFile(join(rulesDir, ".gitignore"));
+			if (!rulesIgnoreWritten) {
+				const warning =
+					"Cline CLI home-agent rules could not be hidden from Git because a user-owned .cline/rules/.gitignore already exists.";
+				sessionWarning = [sessionWarning, warning].filter(Boolean).join(" ");
+			}
 		}
 
 		// Per-task provider/model/effort overrides, passed verbatim. Cline CLI
@@ -2060,6 +2175,15 @@ const clineCliAdapter: AgentSessionAdapter = {
 			args.push("--tui");
 		}
 
+		const hubObserver = hooks
+			? await createClineCliHubObserver({
+					cwd: input.cwd,
+					env: input.env,
+					preparedAt,
+					onRunEvent: (event) => notifyClineCliHubRunEvent(event, hooks, env),
+				})
+			: null;
+
 		const withPromptLaunch = withPrompt(args, input.prompt, "append");
 		return {
 			...withPromptLaunch,
@@ -2067,6 +2191,12 @@ const clineCliAdapter: AgentSessionAdapter = {
 				...withPromptLaunch.env,
 				...env,
 			},
+			...(hubObserver
+				? {
+						onSessionStarted: () => hubObserver.start(),
+						cleanup: () => hubObserver.dispose(),
+					}
+				: {}),
 			...(sessionWarning ? { sessionWarning } : {}),
 		};
 	},

@@ -317,8 +317,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 
 		if (entry.active) {
+			const cleanupFn = entry.active.onSessionCleanup;
+			entry.active.onSessionCleanup = null;
 			stopWorkspaceTrustTimers(entry.active);
 			entry.active.session.stop();
+			if (cleanupFn) {
+				void cleanupFn().catch(() => {
+					// Best effort: cleanup failure is non-critical.
+				});
+			}
 			entry.active = null;
 		}
 		entry.terminalStateMirror?.dispose();
@@ -594,6 +601,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		});
 		this.emitSummary(entry.summary);
 
+		if (launch.onSessionStarted) {
+			void launch.onSessionStarted(cloneSummary(entry.summary)).catch(() => {
+				// Best effort: adapter lifecycle observers must not fail session startup.
+			});
+		}
+
 		return cloneSummary(entry.summary);
 	}
 
@@ -608,8 +621,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 
 		if (entry.active) {
+			const cleanupFn = entry.active.onSessionCleanup;
+			entry.active.onSessionCleanup = null;
 			stopWorkspaceTrustTimers(entry.active);
 			entry.active.session.stop();
+			if (cleanupFn) {
+				void cleanupFn().catch(() => {
+					// Best effort: cleanup failure is non-critical.
+				});
+			}
 			entry.active = null;
 		}
 		entry.terminalStateMirror?.dispose();
@@ -987,8 +1007,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 			if (!entry.active) {
 				continue;
 			}
+			const cleanupFn = entry.active.onSessionCleanup;
+			entry.active.onSessionCleanup = null;
 			stopWorkspaceTrustTimers(entry.active);
 			entry.active.session.stop({ interrupted: true });
+			if (cleanupFn) {
+				void cleanupFn().catch(() => {
+					// Best effort: cleanup failure is non-critical.
+				});
+			}
 		}
 		return activeEntries.map((entry) => cloneSummary(entry.summary));
 	}

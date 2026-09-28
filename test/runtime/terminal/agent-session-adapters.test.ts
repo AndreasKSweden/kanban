@@ -1,11 +1,11 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { afterEach, describe, expect, it } from "vitest";
-
 import { buildTaskAgentSettingsForUpdate } from "../../../src/commands/task";
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
+import { createGitTestEnv } from "../../utilities/git-env";
 
 const originalHome = process.env.HOME;
 const originalAppData = process.env.APPDATA;
@@ -1377,8 +1377,24 @@ describe("cline-cli adapter", () => {
 		return join(taskCwd, ".cline", "hooks", fileName);
 	}
 
+	function initTestGitRepo(cwd: string): void {
+		execFileSync("git", ["init", "-q"], {
+			cwd,
+			env: createGitTestEnv(),
+		});
+	}
+
+	function gitStatusShort(cwd: string): string {
+		return execFileSync("git", ["status", "--short"], {
+			cwd,
+			env: createGitTestEnv(),
+			encoding: "utf8",
+		}).trim();
+	}
+
 	it("writes Cline CLI hook scripts into the worktree .cline/hooks directory", async () => {
 		const taskCwd = setupTaskCwd();
+		initTestGitRepo(taskCwd);
 		const launch = await prepareAgentLaunch({
 			taskId: "task-1",
 			agentId: "cline-cli",
@@ -1432,6 +1448,11 @@ describe("cline-cli adapter", () => {
 		expect(postToolUseScript).toContain("activity");
 		expect(postToolUseScript).toContain("to_in_progress");
 		expect(postToolUseScript).toContain("ask_followup_question");
+
+		const ignorePath = join(taskCwd, ".cline", "hooks", ".gitignore");
+		expect(existsSync(ignorePath)).toBe(true);
+		expect(readFileSync(ignorePath, "utf8")).toContain("kanban-managed: cline-cli hook ignores");
+		expect(gitStatusShort(taskCwd)).toBe("");
 	});
 
 	it("never overwrites user-owned Cline CLI hook files and surfaces a session warning", async () => {
@@ -1455,6 +1476,31 @@ describe("cline-cli adapter", () => {
 		expect(launch.sessionWarning).toContain("TaskComplete");
 		// Other hooks still install normally.
 		expect(existsSync(clineCliHookPath(taskCwd, "UserPromptSubmit"))).toBe(true);
+
+		const ignore = readFileSync(join(taskCwd, ".cline", "hooks", ".gitignore"), "utf8");
+		expect(ignore).not.toContain("/TaskComplete");
+		expect(ignore).toContain("/UserPromptSubmit");
+	});
+
+	it("never overwrites a user-owned Cline CLI hooks .gitignore", async () => {
+		const taskCwd = setupTaskCwd();
+		const hooksDir = join(taskCwd, ".cline", "hooks");
+		const ignorePath = join(hooksDir, ".gitignore");
+		mkdirSync(hooksDir, { recursive: true });
+		writeFileSync(ignorePath, "# user-owned\n/custom-hook\n", "utf8");
+
+		const launch = await prepareAgentLaunch({
+			taskId: "task-1",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: taskCwd,
+			prompt: "Ship the feature",
+			workspaceId: "workspace-1",
+		});
+
+		expect(readFileSync(ignorePath, "utf8")).toBe("# user-owned\n/custom-hook\n");
+		expect(launch.sessionWarning).toContain("user-owned .cline/hooks/.gitignore");
 	});
 
 	it("refreshes stale Kanban-managed Cline CLI hook files", async () => {
@@ -1616,6 +1662,7 @@ describe("cline-cli adapter", () => {
 		const home = setupTempHome();
 		const taskCwd = join(home, "workspace");
 		mkdirSync(taskCwd, { recursive: true });
+		initTestGitRepo(taskCwd);
 		setKanbanProcessContext();
 		const launch = await prepareAgentLaunch({
 			taskId: "__home_agent__:workspace-1:cline-cli",
@@ -1633,5 +1680,29 @@ describe("cline-cli adapter", () => {
 		const rules = readFileSync(rulesPath, "utf8");
 		expect(rules).toContain("Kanban sidebar agent");
 		expect(rules).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create");
+		expect(gitStatusShort(taskCwd)).toBe("");
+	});
+
+	it("never overwrites a user-owned Cline CLI rules .gitignore", async () => {
+		const home = setupTempHome();
+		const taskCwd = join(home, "workspace");
+		const rulesDir = join(taskCwd, ".cline", "rules");
+		const ignorePath = join(rulesDir, ".gitignore");
+		mkdirSync(rulesDir, { recursive: true });
+		writeFileSync(ignorePath, "# user-owned\n/custom-rule.md\n", "utf8");
+		setKanbanProcessContext();
+
+		const launch = await prepareAgentLaunch({
+			taskId: "__home_agent__:workspace-1:cline-cli",
+			agentId: "cline-cli",
+			binary: "cline",
+			args: [],
+			cwd: taskCwd,
+			prompt: "",
+		});
+
+		expect(readFileSync(ignorePath, "utf8")).toBe("# user-owned\n/custom-rule.md\n");
+		expect(launch.sessionWarning).toContain("user-owned .cline/rules/.gitignore");
+		expect(existsSync(join(rulesDir, "kanban-home-agent.md"))).toBe(true);
 	});
 });

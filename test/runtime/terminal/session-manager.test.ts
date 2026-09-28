@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { buildShellCommandLine } from "../../../src/core/shell";
+import { PtySession } from "../../../src/terminal/pty-session";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 
 function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
@@ -237,5 +238,87 @@ describe("TerminalSessionManager", () => {
 			restoreGeneration: 7,
 		});
 		expect(getSnapshotSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("cleans up an existing task observer when replacing it with a shell session", async () => {
+		const manager = new TerminalSessionManager();
+		const cleanup = vi.fn(async () => {});
+		const previousStop = vi.fn();
+		const mirrorDispose = vi.fn();
+
+		const previousActive = {
+			session: {
+				stop: previousStop,
+			} as unknown as PtySession,
+			workspaceTrustBuffer: null,
+			cols: 120,
+			rows: 40,
+			terminalProtocolFilter: {
+				pendingChunk: null,
+				interceptOscColorQueries: true,
+				suppressDeviceAttributeQueries: false,
+			},
+			onSessionCleanup: cleanup,
+			deferredStartupInput: null,
+			detectOutputTransition: null,
+			shouldInspectOutputForTransition: null,
+			awaitingCodexPromptAfterEnter: false,
+			autoConfirmedWorkspaceTrust: false,
+			workspaceTrustConfirmTimer: null,
+			autoRestartOnExit: true,
+			resolveExitReviewActivity: null,
+		};
+
+		const entry = {
+			summary: createSummary({
+				taskId: "task-shell-cleanup",
+				state: "awaiting_review",
+			}),
+			active: previousActive,
+			terminalStateMirror: {
+				dispose: mirrorDispose,
+			},
+			restoreGeneration: 0,
+			listenerIdCounter: 1,
+			listeners: new Map(),
+			restartRequest: null,
+			suppressAutoRestartOnExit: false,
+			autoRestartTimestamps: [],
+			pendingAutoRestart: null,
+		};
+
+		(
+			manager as unknown as {
+				entries: Map<string, typeof entry>;
+			}
+		).entries.set("task-shell-cleanup", entry);
+
+		const shellSession = {
+			pid: 5678,
+			stop: vi.fn(),
+			write: vi.fn(),
+			resize: vi.fn(),
+			wasInterrupted: vi.fn(() => false),
+		} as unknown as PtySession;
+
+		const spawnSpy = vi.spyOn(PtySession, "spawn").mockReturnValue(shellSession);
+
+		try {
+			const summary = await manager.startShellSession({
+				taskId: "task-shell-cleanup",
+				cwd: "/tmp",
+				binary: "sh",
+				args: [],
+			});
+
+			expect(previousStop).toHaveBeenCalledTimes(1);
+			expect(cleanup).toHaveBeenCalledTimes(1);
+			expect(previousActive.onSessionCleanup).toBeNull();
+			expect(mirrorDispose).toHaveBeenCalledTimes(1);
+			expect(summary.state).toBe("running");
+			expect(summary.pid).toBe(5678);
+		} finally {
+			spawnSpy.mockRestore();
+		}
 	});
 });
