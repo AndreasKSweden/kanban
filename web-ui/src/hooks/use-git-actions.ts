@@ -77,6 +77,7 @@ export interface UseGitActionsResult {
 	handleOpenPrTask: (taskId: string) => void;
 	handleAgentCommitTask: (taskId: string) => void;
 	handleAgentOpenPrTask: (taskId: string) => void;
+	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
 	resetGitActionState: () => void;
 }
 
@@ -676,6 +677,13 @@ export function useGitActions({
 		}
 	}, [currentProjectId, isDiscardingHomeWorkingChanges, refreshGitHistory]);
 
+	const runAutoReviewGitAction = useCallback(
+		async (taskId: string, action: TaskGitAction) => {
+			return await runTaskGitAction(taskId, action, "card");
+		},
+		[runTaskGitAction],
+	);
+
 	const resetGitActionState = useCallback(() => {
 		setRunningGitAction(null);
 		setTaskGitActionLoadingByTaskId({});
@@ -719,6 +727,7 @@ export function useGitActions({
 		handleOpenPrTask,
 		handleAgentCommitTask,
 		handleAgentOpenPrTask,
+		runAutoReviewGitAction,
 		resetGitActionState,
 	};
 }

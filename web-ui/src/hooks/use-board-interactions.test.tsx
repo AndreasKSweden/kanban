@@ -125,6 +125,8 @@ function HookHarness({
 		fetchTaskWorkspaceInfo: NOOP_FETCH_WORKSPACE_INFO,
 		sendTaskSessionInput: NOOP_SEND_TASK_INPUT,
 		readyForReviewNotificationsEnabled: false,
+		taskGitActionLoadingByTaskId: {},
+		runAutoReviewGitAction: async () => true,
 	});
 
 	useEffect(() => {
