@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { runtimeBoardCardSchema } from "../../src/core/api-contract";
+import { runtimeBoardCardSchema, runtimeTaskSessionModeSchema } from "../../src/core/api-contract";
 import { parseRuntimeClineReasoningEffort } from "../../src/core/task-agent-settings";
 
 function parseCard(overrides: Record<string, unknown>) {
@@ -73,5 +73,11 @@ describe("parseRuntimeClineReasoningEffort", () => {
 
 	it("rejects opaque card values that Cline cannot launch with", () => {
 		expect(parseRuntimeClineReasoningEffort("ultracode")).toBeNull();
+	});
+});
+
+describe("runtimeTaskSessionModeSchema", () => {
+	it("accepts legacy yolo session state", () => {
+		expect(runtimeTaskSessionModeSchema.parse("yolo")).toBe("yolo");
 	});
 });

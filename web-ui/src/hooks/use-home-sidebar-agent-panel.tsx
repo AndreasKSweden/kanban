@@ -114,7 +114,14 @@ export function useHomeSidebarAgentPanel({
 	const latestHomeTaskChatMessage = selectLatestTaskChatMessageForTask(taskId, latestTaskChatMessage);
 
 	const handleSendHomeClineChatMessage = useCallback(
-		async (messageTaskId: string, text: string, options?: { mode?: "act" | "plan" }) => {
+		async (
+			messageTaskId: string,
+			text: string,
+			options?: {
+				mode?: "act" | "plan" | "yolo";
+				images?: Array<{ id: string; data: string; mimeType: string; name?: string }>;
+			},
+		) => {
 			const result = await sendTaskChatMessage(messageTaskId, text, options);
 			if (!result.ok) {
 				return result;
