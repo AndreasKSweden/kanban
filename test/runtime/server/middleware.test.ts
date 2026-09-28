@@ -38,6 +38,36 @@ describe("evaluateCors", () => {
 		expect(decision).toEqual({ kind: "allow", origin: ALLOWED_ORIGIN });
 	});
 
+	it("allows an IP origin on the runtime port for wildcard bindings", () => {
+		const decision = evaluateCors({
+			method: "POST",
+			originHeader: "http://100.85.223.22:3484",
+			allowedOrigin: "http://0.0.0.0:3484",
+			allowIpOriginsOnPort: 3484,
+		});
+		expect(decision).toEqual({ kind: "allow", origin: "http://100.85.223.22:3484" });
+	});
+
+	it("still rejects DNS origins when wildcard IP access is enabled", () => {
+		const decision = evaluateCors({
+			method: "POST",
+			originHeader: "http://attacker.example.com:3484",
+			allowedOrigin: "http://0.0.0.0:3484",
+			allowIpOriginsOnPort: 3484,
+		});
+		expect(decision).toEqual({ kind: "reject", origin: "http://attacker.example.com:3484" });
+	});
+
+	it("rejects an IP origin on a different port for wildcard bindings", () => {
+		const decision = evaluateCors({
+			method: "POST",
+			originHeader: "http://100.85.223.22:9999",
+			allowedOrigin: "http://0.0.0.0:3484",
+			allowIpOriginsOnPort: 3484,
+		});
+		expect(decision).toEqual({ kind: "reject", origin: "http://100.85.223.22:9999" });
+	});
+
 	it("rejects requests from a different origin", () => {
 		const decision = evaluateCors({
 			method: "POST",
@@ -112,6 +142,36 @@ describe("evaluateHost", () => {
 
 	it("normalises Host header casing before comparing", () => {
 		expect(evaluateHost({ hostHeader: "LocalHost:3484", allowedHosts: ALLOWED_HOSTS })).toEqual({ kind: "allow" });
+	});
+
+	it("allows an IP Host on the runtime port for wildcard bindings", () => {
+		expect(
+			evaluateHost({
+				hostHeader: "100.85.223.22:3484",
+				allowedHosts: new Set(["0.0.0.0:3484"]),
+				allowIpHostsOnPort: 3484,
+			}),
+		).toEqual({ kind: "allow" });
+	});
+
+	it("still rejects DNS Host headers when wildcard IP access is enabled", () => {
+		expect(
+			evaluateHost({
+				hostHeader: "attacker.example.com:3484",
+				allowedHosts: new Set(["0.0.0.0:3484"]),
+				allowIpHostsOnPort: 3484,
+			}),
+		).toEqual({ kind: "reject", host: "attacker.example.com:3484" });
+	});
+
+	it("rejects an IP Host on a different port for wildcard bindings", () => {
+		expect(
+			evaluateHost({
+				hostHeader: "100.85.223.22:9999",
+				allowedHosts: new Set(["0.0.0.0:3484"]),
+				allowIpHostsOnPort: 3484,
+			}),
+		).toEqual({ kind: "reject", host: "100.85.223.22:9999" });
 	});
 
 	it("rejects DNS rebinding attempts via a foreign Host header", () => {
