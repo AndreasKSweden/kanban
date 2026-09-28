@@ -54,11 +54,11 @@ describe("resolveClineSdkSystemPrompt", () => {
 
 	it("keeps usage-billing cline providerId and appends workspace metadata", async () => {
 		const prompt = await resolveClineSdkSystemPrompt({
-			cwd: "/tmp/worktree",
+			cwd: "/tmp/worktree-cline",
 			providerId: "cline",
 		});
 
-		expect(sdkMocks.buildWorkspaceMetadata).toHaveBeenCalledWith("/tmp/worktree");
+		expect(sdkMocks.buildWorkspaceMetadata).toHaveBeenCalledWith("/tmp/worktree-cline");
 		expect(sdkMocks.getClineDefaultSystemPrompt).toHaveBeenCalledWith(
 			expect.objectContaining({
 				providerId: "cline",
