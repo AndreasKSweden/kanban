@@ -466,6 +466,24 @@ export function createAutoReviewReconciler(deps: CreateAutoReviewReconcilerDepen
 				}
 				const pendingGitAction = card.pendingGitAction ?? null;
 				const effectiveAgent = card.agentId ?? selectedAgentId;
+				const clineSummary =
+					effectiveAgent === "cline"
+						? deps.getClineTaskSessionService?.(workspace.workspaceId)?.getSummary(card.id)
+						: null;
+				// sendTaskSessionInput acknowledges submission before the SDK promise
+				// settles. A later failure must disarm the action, not leave it waiting
+				// for a commit that will never arrive. Leave the visible error for the
+				// user; another successful turn can enable auto-review again.
+				if (clineSummary?.reviewReason === "error") {
+					if (
+						pendingGitAction &&
+						(clineSummary.lastOutputAt ?? 0) >= pendingGitAction.requestedAt &&
+						(await clearPendingGitAction(workspacePath, card.id))
+					) {
+						boardMutated = true;
+					}
+					continue;
+				}
 
 				if (pendingGitAction) {
 					if (isPendingGitActionStale(pendingGitAction, timestamp)) {

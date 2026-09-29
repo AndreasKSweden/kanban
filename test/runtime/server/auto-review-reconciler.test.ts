@@ -367,6 +367,38 @@ describe("auto-review reconciler", () => {
 		expect(completed?.card.pendingGitAction ?? null).toBeNull();
 	});
 
+	it("disarms an asynchronous Cline failure and permits review after a later successful turn", async () => {
+		const cline = createFakeClineService();
+		const harness = createHarness({
+			board: createBoard({ review: [createCard({ id: "task-1", autoReviewEnabled: true })] }),
+			selectedAgentId: "cline",
+			clineService: cline.service,
+			now: () => 100,
+		});
+		harness.setProbe("task-1", { exists: true, headCommit: "commit-1", changedFiles: 3 });
+		await Promise.all([harness.evaluate(), harness.evaluate(), harness.evaluate()]);
+		expect(cline.sendTaskSessionInput).toHaveBeenCalledTimes(1);
+		cline.getSummary.mockReturnValue({
+			taskId: "task-1",
+			state: "awaiting_review",
+			reviewReason: "error",
+			lastOutputAt: 101,
+		} as RuntimeTaskSessionSummary);
+		await harness.evaluate();
+		expect(findCardInBoard(harness.store.stored.board, "task-1")?.card.pendingGitAction).toBeNull();
+		await harness.evaluate();
+		expect(cline.sendTaskSessionInput).toHaveBeenCalledTimes(1);
+		cline.getSummary.mockReturnValue({
+			taskId: "task-1",
+			state: "awaiting_review",
+			reviewReason: "hook",
+			lastOutputAt: 102,
+		} as RuntimeTaskSessionSummary);
+		await harness.evaluate();
+		expect(cline.sendTaskSessionInput).toHaveBeenCalledTimes(2);
+		harness.reconciler.close();
+	});
+
 	it("never arms a native Cline card while no Cline session exists", async () => {
 		const card = createCard({ id: "task-1", autoReviewEnabled: true });
 		const harness = createHarness({

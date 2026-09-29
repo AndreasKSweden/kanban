@@ -9,6 +9,7 @@ import {
 	createClineMcpRuntimeService,
 } from "./cline-mcp-runtime-service";
 import { createKanbanClineLogger } from "./cline-runtime-logger";
+import { ClineSendGate } from "./cline-send-gate";
 import { buildSessionIdPrefix, createSessionId } from "./cline-session-state";
 import { CLINE_MODEL_CATALOG_DEFAULTS } from "./sdk-provider-boundary";
 import {
@@ -129,6 +130,7 @@ export interface CreateInMemoryClineSessionRuntimeOptions {
 	onTaskEvent?: (taskId: string, event: unknown) => void;
 	createSessionHost?: () => Promise<ClineSessionHostBoundary>;
 	createMcpRuntimeService?: () => ClineMcpRuntimeService;
+	continuationTimeoutMs?: number;
 }
 
 // Best-effort: write the Kanban task title to the SDK session metadata so external session
@@ -159,6 +161,8 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 		Omit<StartClineSessionRuntimeRequest, "prompt" | "images" | "initialMessages">
 	>();
 	private readonly mcpToolBundleByTaskId = new Map<string, ClineMcpToolBundle>();
+	private readonly sendGateBySessionId = new Map<string, ClineSendGate>();
+	private readonly continuationTimeoutMs: number;
 	private sessionHostPromise: Promise<ClineSessionHostBoundary> | null = null;
 	private sessionHostUnsubscribe: (() => void) | null = null;
 	// Cache of persisted session records keyed by taskId so repeated card opens
@@ -168,6 +172,7 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 	private readonly persistedRecordByTaskId = new Map<string, ClineSdkSessionRecord>();
 
 	constructor(options: CreateInMemoryClineSessionRuntimeOptions = {}) {
+		this.continuationTimeoutMs = options.continuationTimeoutMs ?? 60_000;
 		this.onTaskEvent = options.onTaskEvent ?? null;
 		this.createSessionHost = options.createSessionHost ?? createClineSdkSessionHost;
 		const createMcpRuntimeService = options.createMcpRuntimeService ?? createClineMcpRuntimeService;
@@ -268,7 +273,7 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 		let result: unknown = startResult.result ?? null;
 		if (shouldSendInitialTurn) {
 			try {
-				result = await sessionHost.send({
+				result = await this.sendWhenReady(sessionHost, {
 					sessionId: startResult.sessionId,
 					prompt: request.prompt,
 					userImages,
@@ -326,7 +331,7 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 			this.updateActiveSessionMode(sessionHost, sessionId, mode);
 			this.updateLastStartRequestMode(taskId, mode);
 		}
-		return await sessionHost.send({
+		return await this.sendWhenReady(sessionHost, {
 			sessionId,
 			prompt,
 			userImages: toSdkUserImages(images),
@@ -350,6 +355,7 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 
 	async stopTaskSession(taskId: string): Promise<void> {
 		const sessionId = this.sessionIdByTaskId.get(taskId);
+		if (sessionId) this.sendGateBySessionId.get(sessionId)?.cancel();
 		if (!sessionId) {
 			await this.releaseTaskMcpToolBundle(taskId);
 			return;
@@ -371,6 +377,7 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 
 	async abortTaskSession(taskId: string): Promise<void> {
 		const sessionId = this.sessionIdByTaskId.get(taskId);
+		if (sessionId) this.sendGateBySessionId.get(sessionId)?.cancel();
 		if (!sessionId) {
 			await this.releaseTaskMcpToolBundle(taskId);
 			return;
@@ -391,6 +398,8 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 	}
 
 	async clearTaskSessions(taskId: string): Promise<void> {
+		const boundSessionId = this.sessionIdByTaskId.get(taskId);
+		if (boundSessionId) this.sendGateBySessionId.get(boundSessionId)?.cancel();
 		const sessionHost = await this.ensureSessionHost();
 		const sessionIdPrefix = buildSessionIdPrefix(taskId);
 		const records = await sessionHost.list();
@@ -446,6 +455,8 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 	}
 
 	async dispose(): Promise<void> {
+		for (const gate of this.sendGateBySessionId.values()) gate.cancel();
+		this.sendGateBySessionId.clear();
 		const hostPromise = this.sessionHostPromise;
 		this.sessionHostPromise = null;
 		// Unsubscribe from the SDK event stream before disposing the host so the
@@ -521,6 +532,24 @@ export class InMemoryClineSessionRuntime implements ClineSessionRuntime {
 		}
 		this.sessionIdByTaskId.delete(taskId);
 		this.taskIdBySessionId.delete(activeSessionId);
+		this.sendGateBySessionId.get(activeSessionId)?.cancel();
+		this.sendGateBySessionId.delete(activeSessionId);
+	}
+
+	private sendWhenReady(
+		sessionHost: ClineSessionHostBoundary,
+		input: Parameters<ClineSdkSessionHost["send"]>[0],
+	): Promise<unknown> {
+		// Explicit queue/steer input belongs to the SDK's interactive queue;
+		// its acknowledgement is not a completed run. Only immediate sends
+		// (initial run and review/continuation) reserve a full run here.
+		if (input.delivery) return sessionHost.send(input);
+		let gate = this.sendGateBySessionId.get(input.sessionId);
+		if (!gate) {
+			gate = new ClineSendGate(this.continuationTimeoutMs);
+			this.sendGateBySessionId.set(input.sessionId, gate);
+		}
+		return gate.run(() => sessionHost.send(input));
 	}
 
 	private async findPersistedTaskSessionRecord(

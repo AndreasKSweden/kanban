@@ -5,12 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import { resetWorkspaceMetadataStore, setTaskWorkspaceSnapshot } from "@/stores/workspace-metadata-store";
 import type { BoardCard, BoardData } from "@/types";
 
 const notifyErrorMock = vi.hoisted(() => vi.fn());
 const showAppToastMock = vi.hoisted(() => vi.fn());
 const useLinkedBacklogTaskActionsMock = vi.hoisted(() => vi.fn());
 const useProgrammaticCardMovesMock = vi.hoisted(() => vi.fn());
+const runAutoReviewGitAction = vi.fn(async () => true);
 
 vi.mock("@/components/app-toaster", () => ({
 	notifyError: notifyErrorMock,
@@ -125,8 +127,8 @@ function HookHarness({
 		fetchTaskWorkspaceInfo: NOOP_FETCH_WORKSPACE_INFO,
 		sendTaskSessionInput: NOOP_SEND_TASK_INPUT,
 		readyForReviewNotificationsEnabled: false,
-		taskGitActionLoadingByTaskId: {},
-		runAutoReviewGitAction: async () => true,
+		// Simulate a stale browser still carrying the former automation callbacks.
+		...{ taskGitActionLoadingByTaskId: {}, runAutoReviewGitAction },
 	});
 
 	useEffect(() => {
@@ -179,6 +181,8 @@ describe("useBoardInteractions", () => {
 		act(() => {
 			root.unmount();
 		});
+		resetWorkspaceMetadataStore();
+		runAutoReviewGitAction.mockClear();
 		vi.restoreAllMocks();
 		vi.useRealTimers();
 		container.remove();
@@ -188,6 +192,60 @@ describe("useBoardInteractions", () => {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
 		}
+	});
+
+	it("leaves auto-review delivery to the runtime even with stale unarmed board snapshots", async () => {
+		const moveToTrash = vi.fn(async () => {});
+		useProgrammaticCardMovesMock.mockReturnValue({
+			handleProgrammaticCardMoveReady: () => {},
+			setRequestMoveTaskToTrashHandler: () => {},
+			tryProgrammaticCardMove: () => "unavailable",
+			consumeProgrammaticCardMove: () => ({}),
+			resolvePendingProgrammaticTrashMove: () => {},
+			waitForProgrammaticCardMoveAvailability: async () => {},
+			resetProgrammaticCardMoves: () => {},
+			requestMoveTaskToTrashWithAnimation: moveToTrash,
+			programmaticCardMoveCycle: 0,
+		});
+		useLinkedBacklogTaskActionsMock.mockReturnValue({
+			handleCreateDependency: () => {},
+			handleDeleteDependency: () => {},
+			confirmMoveTaskToTrash: async () => {},
+			requestMoveTaskToTrash: async () => {},
+		});
+		const board = createBoard();
+		const backlog = board.columns.find((column) => column.id === "backlog");
+		const review = board.columns.find((column) => column.id === "review");
+		if (!backlog || !review) throw new Error("Missing test columns");
+		backlog.cards = [];
+		review.cards = [{ ...createTask("task-1", "Review", 1), autoReviewEnabled: true }];
+		setTaskWorkspaceSnapshot({
+			taskId: "task-1",
+			path: "/tmp/task-1",
+			branch: "main",
+			isDetached: false,
+			headCommit: "before",
+			changedFiles: 3,
+			additions: 10,
+			deletions: 0,
+		});
+		for (let refresh = 0; refresh < 3; refresh++) {
+			await act(async () => {
+				root.render(
+					<HookHarness
+						board={structuredClone(board)}
+						setBoard={vi.fn()}
+						ensureTaskWorkspace={vi.fn()}
+						startTaskSession={vi.fn()}
+					/>,
+				);
+			});
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(1000);
+			});
+		}
+		expect(runAutoReviewGitAction).not.toHaveBeenCalled();
+		expect(moveToTrash).not.toHaveBeenCalled();
 	});
 
 	it("starts dependency-unblocked tasks even when setBoard updater is deferred", async () => {

@@ -931,3 +931,107 @@ describe("InMemoryClineSessionRuntime", () => {
 		expect(runtime.getTaskSessionId("task-1")).toBeNull();
 	});
 });
+
+function createReadinessHarness() {
+	let listener: (event: unknown) => void = () => {};
+	let running = false;
+	const drain = createDeferred<unknown>();
+	const started = createDeferred<void>();
+	const host = {
+		start: vi.fn(async () => ({ sessionId: "readiness-session" })),
+		send: vi.fn(async () => {
+			if (running) throw new Error('SessionRuntime state is "running"; call canStartRun() first');
+			if (host.send.mock.calls.length > 1) return { text: "correction complete" };
+			running = true;
+			started.resolve();
+			try {
+				return await drain.promise;
+			} finally {
+				running = false;
+			}
+		}),
+		stop: vi.fn(async () => {}),
+		abort: vi.fn(async () => {}),
+		delete: vi.fn(async () => true),
+		dispose: vi.fn(async () => {}),
+		get: vi.fn(async () => undefined),
+		list: vi.fn(async () => []),
+		readMessages: vi.fn(async () => []),
+		subscribe: vi.fn((callback: (event: unknown) => void) => {
+			listener = callback;
+			return () => {};
+		}),
+	};
+	const onTaskEvent = vi.fn();
+	const runtime = createInMemoryClineSessionRuntime({
+		createSessionHost: async () => host,
+		createMcpRuntimeService: createNoopMcpRuntimeService,
+		onTaskEvent,
+	});
+	const first = runtime.startTaskSession({
+		taskId: "review-task",
+		cwd: "/tmp/worktree",
+		prompt: "implementation",
+		providerId: "ollama",
+		modelId: "test",
+		systemPrompt: "test",
+	});
+	return {
+		runtime,
+		host,
+		first,
+		started: started.promise,
+		drain,
+		onTaskEvent,
+		canStartRun: () => !running,
+		finalOutput: () =>
+			listener({
+				type: "agent_event",
+				payload: {
+					sessionId: "readiness-session",
+					event: { type: "done", reason: "completed", text: "implementation complete" },
+				},
+			}),
+	};
+}
+
+describe("review continuation on the same SDK session", () => {
+	it("waits for the actual send promise after final output and starts the correction once", async () => {
+		const h = createReadinessHarness();
+		await h.started;
+		h.finalOutput();
+		expect(h.onTaskEvent).toHaveBeenCalled();
+		expect(h.canStartRun()).toBe(false);
+		const correction = h.runtime.sendTaskSessionInput("review-task", "correct the review findings");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(h.host.send).toHaveBeenCalledTimes(1);
+		h.drain.resolve({ text: "implementation complete" });
+		await h.first;
+		await expect(correction).resolves.toEqual({ text: "correction complete" });
+		expect(h.canStartRun()).toBe(true);
+		expect(h.host.send).toHaveBeenCalledTimes(2);
+		expect(h.host.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "readiness-session" }));
+		await h.runtime.dispose();
+	});
+
+	it.each(["abortTaskSession", "stopTaskSession", "clearTaskSessions", "dispose"] as const)(
+		"cancels a pending correction on %s without a late send",
+		async (method) => {
+			const h = createReadinessHarness();
+			await h.started;
+			h.finalOutput();
+			const correction = expect(h.runtime.sendTaskSessionInput("review-task", "correction")).rejects.toThrow(
+				"cancelled",
+			);
+			await Promise.resolve();
+			await Promise.resolve();
+			if (method === "dispose") await h.runtime.dispose();
+			else await h.runtime[method]("review-task");
+			await correction;
+			h.drain.resolve({ text: "finished after cancellation" });
+			await h.first;
+			expect(h.host.send).toHaveBeenCalledTimes(1);
+		},
+	);
+});
